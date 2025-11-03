@@ -16,6 +16,7 @@
 #ifndef _WIN32
 #include <torch/csrc/distributed/c10d/HashStore.hpp>
 #endif
+#include <torch/csrc/distributed/c10d/CallbackWork.hpp>
 #include <torch/csrc/distributed/c10d/FakeProcessGroup.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <torch/csrc/distributed/c10d/PyProcessGroup.hpp>
@@ -3875,6 +3876,33 @@ such as `dist.all_reduce(tensor, async_op=True)`.
           .def_readwrite("seq_id", &::c10d::FakeWork::seq_id) // Expose seq_id
           .def("wait", &::c10d::FakeWork::wait, py::arg("timeout") = kNoTimeout)
           .def("getFuture", &::c10d::FakeWork::getFuture);
+
+  auto callbackWork =
+      intrusive_ptr_no_gil_destructor_class_<::c10d::CallbackWork>(
+          module, "CallbackWork", work)
+          .def(py::init<py::object>(), py::arg("callback"))
+          .def(
+              "wait",
+              &::c10d::CallbackWork::wait,
+              py::arg("timeout") = kNoTimeout,
+              R"(
+              Waits until the callback completes. Blocking operation.
+              The callback is invoked with the timeout parameter and should return a boolean.
+              Throws if the callback completes with an exception.
+              Returns the boolean value returned by the callback.
+            )")
+          .def(
+              "get_future",
+              [](::c10d::CallbackWork& work)
+                  -> std::shared_ptr<jit::PythonFutureWrapper> {
+                return std::make_shared<jit::PythonFutureWrapper>(
+                    work.getFuture());
+              },
+              R"(
+            Returns:
+                A ``torch.futures.Future`` object which is associated with the completion of
+                the ``CallbackWork``.
+           )");
 
   py::class_<c10::DDPLoggingData>(module, "DDPLoggingData")
       .def(py::init<>())
