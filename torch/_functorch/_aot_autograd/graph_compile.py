@@ -25,6 +25,9 @@ from typing import Any, Optional, TYPE_CHECKING, Union
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+import threading
+from contextlib import contextmanager
+
 import torch
 import torch.utils._pytree as pytree
 import torch.utils.dlpack
@@ -95,6 +98,28 @@ from .utils import (
     strict_zip,
     unlift_tokens,
 )
+
+
+_thread_local = threading.local()
+
+
+@contextmanager
+def saved_tensor_hook_context(state: dict[str, Any]):
+    previous_state = getattr(_thread_local, "state", None)
+    try:
+        _thread_local.state = state
+        yield
+    finally:
+        # Clean up: restore previous state or remove attribute
+        if previous_state is not None:
+            _thread_local.state = previous_state
+        else:
+            if hasattr(_thread_local, "state"):
+                delattr(_thread_local, "state")
+
+
+def get_saved_tensor_hook_context() -> dict[str, Any] | None:
+    return getattr(_thread_local, "state", None)
 
 
 zip = strict_zip
@@ -1097,7 +1122,11 @@ def maybe_inline_graph_saved_tensors_hooks(
         if not isinstance(val, torch.Tensor):
             continue
 
-        pack_out_val = pack_hook_gm(val)
+        def _get_extra_info() -> dict[str, Any]:
+            return {"fw_graph": fw_g, "bw_graph": bw_g, "node": saved}
+
+        with saved_tensor_hook_context(_get_extra_info()):
+            pack_out_val = pack_hook_gm(val)
 
         requires_sc_handling = any(
             is_traceable_wrapper_subclass(x) for x in pytree.tree_leaves(pack_out_val)
@@ -1109,16 +1138,17 @@ def maybe_inline_graph_saved_tensors_hooks(
                 " in the pack hook, and reconstructing the subclass in the unpack hook"
             )
 
-        pack_gm = prepare_hook_gm(aot_config, pack_hook_gm, (val,))
-        pack_g = pack_gm.graph
-        maybe_log_graph(
-            pack_gm,
-            f"saved_tensors_pack_hook {saved.name}",
-            aot_config,
-            lambda: f"aot_saved_tensors_hooks_pack {saved.name}",
-            structured_logs,
-        )
-        pack_out_val = pack_gm(val)
+        with saved_tensor_hook_context(_get_extra_info()):
+            pack_gm = prepare_hook_gm(aot_config, pack_hook_gm, (val,))
+            pack_g = pack_gm.graph
+            maybe_log_graph(
+                pack_gm,
+                f"saved_tensors_pack_hook {saved.name}",
+                aot_config,
+                lambda: f"aot_saved_tensors_hooks_pack {saved.name}",
+                structured_logs,
+            )
+            pack_out_val = pack_gm(val)
 
         # Install pack hook graph as eiplogue of fw_module.
         # Saved tensor output becomes input of pack hook graph.
@@ -1188,15 +1218,16 @@ def maybe_inline_graph_saved_tensors_hooks(
         # Install unpack hook graph as a prologue of backward graph
         # Saved tensors inputs are replaced with packed tensors and packed sym scalars.
         # The saved tensors inputs usages in the graph are replaced with unpack hook graph outputs.
-        unpack_gm = prepare_hook_gm(aot_config, unpack_hook_gm, (pack_out_val,))
-        unpack_g = unpack_gm.graph
-        maybe_log_graph(
-            unpack_gm,
-            f"saved_tensors_unpack_hook {saved.name}",
-            aot_config,
-            lambda: f"aot_saved_tensors_hooks_unpack {saved.name}",
-            structured_logs,
-        )
+        with saved_tensor_hook_context(_get_extra_info()):
+            unpack_gm = prepare_hook_gm(aot_config, unpack_hook_gm, (pack_out_val,))
+            unpack_g = unpack_gm.graph
+            maybe_log_graph(
+                unpack_gm,
+                f"saved_tensors_unpack_hook {saved.name}",
+                aot_config,
+                lambda: f"aot_saved_tensors_hooks_unpack {saved.name}",
+                structured_logs,
+            )
 
         def find_saved_in_bw_inputs(bw_inputs):
             for n in bw_inputs:
