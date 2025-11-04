@@ -55,7 +55,8 @@ class SimpleOperatorEntry:
         )
 
         self.effect: Optional[EffectType] = None
-        # If the op contains a ScriptObject input, we want to mark it as having effects
+        # If the op contains a ScriptObject or OpaqueObject input, we want to
+        # mark it as having effects
         if len(qualname.split(".")) > 1:
             overload = qualname.split(".")[1]
             qualname = qualname.split(".")[0]
@@ -67,7 +68,7 @@ class SimpleOperatorEntry:
             # In the HOO case
             return
         for arg in schema.arguments:
-            if isinstance(arg.type, torch.ClassType):
+            if isinstance(arg.type, (torch.ClassType, torch.PyObjectType)):
                 self.effect = EffectType.ORDERED
                 break
 
